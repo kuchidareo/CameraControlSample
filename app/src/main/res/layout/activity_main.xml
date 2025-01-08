@@ -43,4 +43,15 @@
         android:text="2x"
         app:layout_constraintStart_toEndOf="@+id/button_superwide"
         app:layout_constraintBottom_toBottomOf="parent" />
+
+
+    <Button
+        android:id="@+id/button_capture"
+        android:layout_width="70dp"
+        android:layout_height="50dp"
+        android:layout_marginTop="10dp"
+        android:layout_marginLeft="10dp"
+        android:text="Capture"
+        app:layout_constraintLeft_toLeftOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/surfaceView" />
 </androidx.constraintlayout.widget.ConstraintLayout>
