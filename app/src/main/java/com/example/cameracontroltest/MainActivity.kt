@@ -20,6 +20,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -49,7 +50,12 @@ class MainActivity : AppCompatActivity() {
   private lateinit var telephotoButton: Button
   private lateinit var captureButton: Button
 
-  private lateinit var gestureDetector: GestureDetector
+  private lateinit var focusGestureDetector: GestureDetector
+  private lateinit var scaleGestureDetector: ScaleGestureDetector
+  private var zoomLevel = 1f
+  private var maxZoom: Float = 1f
+  private val minZoom: Float = 0.5f
+  private lateinit var sensorArraySize: Rect
 
   private var backgroundThread: HandlerThread? = null
   private var backgroundHandler: Handler? = null
@@ -89,7 +95,7 @@ class MainActivity : AppCompatActivity() {
     captureButton.setOnClickListener { capturePhoto() }
 
     // Initialize GestureDetector
-    gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+    focusGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
       override fun onSingleTapUp(event: MotionEvent): Boolean {
         val x = event.x
         val y = event.y
@@ -101,8 +107,20 @@ class MainActivity : AppCompatActivity() {
         return true
       }
     })
+
+    scaleGestureDetector = ScaleGestureDetector(this, object: ScaleGestureDetector.SimpleOnScaleGestureListener() {
+      override fun onScale(detector: ScaleGestureDetector): Boolean {
+        val scaleFactor = detector.scaleFactor
+        handlePinchToZoom(scaleFactor)
+        return true
+      }
+    })
+
     surfaceView.setOnTouchListener { _, event ->
-      gestureDetector.onTouchEvent(event)
+      scaleGestureDetector.onTouchEvent(event)
+      if (!scaleGestureDetector.isInProgress) {
+        focusGestureDetector.onTouchEvent(event)
+      }
       return@setOnTouchListener true
     }
   }
@@ -183,6 +201,8 @@ class MainActivity : AppCompatActivity() {
         override fun onOpened(camera: CameraDevice) {
           cameraDevice = camera
           cameraCharacteristics = physicalCameraId?.let { cameraManager.getCameraCharacteristics(it) }!!
+          maxZoom = cameraCharacteristics.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)!!
+          sensorArraySize = cameraCharacteristics[CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE]!!
           startPreview()
         }
 
@@ -247,17 +267,63 @@ class MainActivity : AppCompatActivity() {
         },
         null
       )
-
     } catch (e: CameraAccessException) {
       e.printStackTrace()
     }
   }
 
+  private fun handlePinchToZoom(scaleFactor: Float) {
+    var newZoomLevel = (zoomLevel * scaleFactor)
+    if (newZoomLevel > maxZoom) {
+      newZoomLevel = maxZoom
+    }
+    if (newZoomLevel != zoomLevel) {
+      zoomLevel = newZoomLevel
+      val cropRegion = createZoomArea(zoomLevel)
+      previewRequestBuilder.set(CaptureRequest.SCALER_CROP_REGION, cropRegion)
+      captureSession!!.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
+    }
+  }
+
+  private fun createZoomArea(zoomScale: Float): Rect? {
+    if (sensorArraySize == null) return null
+    var zoom = 0f
+    if (zoomScale > maxZoom) {
+      // limit by　maximum value, if  exceeded
+      zoom = maxZoom
+    } else if (zoomScale > minZoom) {
+      // set zoom, when larger than threshold
+      zoom = zoomScale
+    } else {
+      // return original sensor size, when smaller than threshold
+      return sensorArraySize
+    }
+
+    // sensor size
+    val sensor_width: Int = sensorArraySize.width()
+    val sensor_height: Int = sensorArraySize.height()
+    val center_x: Int = sensorArraySize.centerX()
+    val center_y: Int = sensorArraySize.centerY()
+
+    // zoom size
+    val zoom_width = (sensor_width.toFloat() / zoom).toInt()
+    val zoom_height = (sensor_height.toFloat() / zoom).toInt()
+
+    // rectangle
+    val right = center_x - zoom_width / 2
+    val left = center_x + zoom_width / 2
+    val top = center_y - zoom_height / 2
+    val bottom = center_y + zoom_height / 2
+    val rect = Rect(right, top, left, bottom)
+    return rect
+  }
+
+
   private fun handleTapToFocus(x: Float, y: Float) {
     val surface = surfaceHolder.surface
     val viewWidth = surfaceView.width
     val viewHeight = surfaceView.height
-    val meteringRectangle = createAutoFocusAreaRect(x, y, viewWidth, viewHeight)
+    val meteringRectangle = createAutoFocusAreaRect(x, y, viewWidth, viewHeight, zoomLevel)
 
     stopRepeating()
     cancelAutoFocusTrigger()
@@ -306,10 +372,11 @@ class MainActivity : AppCompatActivity() {
     screenX: Float,
     screenY: Float,
     screenW: Int,
-    screenH: Int
+    screenH: Int,
+    zoomLevel: Float
   ): MeteringRectangle? {
     // xy coordinates of camera sensor
-    val point: Point = convAutoFocusTouch(screenX, screenY, screenW, screenH)
+    val point: Point = convAutoFocusTouch(screenX, screenY, screenW, screenH, zoomLevel)
     val sensor_x = point.x
     val sensor_y = point.y
 
@@ -337,25 +404,70 @@ class MainActivity : AppCompatActivity() {
     screenX: Float,
     screenY: Float,
     screenW: Int,
-    screenH: Int
+    screenH: Int,
+    zoomLevel: Float
   ): Point {
-    val sensorOrientation = cameraCharacteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0
-    val sensorArraySize: Rect? = cameraCharacteristics[CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE]
+
     val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     val displayRotation = windowManager.defaultDisplay.rotation
+    val sensorOrientation = cameraCharacteristics[CameraCharacteristics.SENSOR_ORIENTATION]!!
 
-    val ratio_x = screenX / screenW.toFloat()
-    val ratio_y = screenY / screenH.toFloat()
-    val sensorWidth: Int = sensorArraySize?.width() ?: 0
-    val sensorHeight: Int = sensorArraySize?.height() ?: 0
-    var new_x = (ratio_x * sensorWidth).toInt()
-    var new_y = (ratio_y * sensorHeight).toInt()
+    val ratioX = screenX / screenW.toFloat()
+    val ratioY = screenY / screenH.toFloat()
+    val sensorWidth: Int = sensorArraySize.width() ?: 0
+    val sensorHeight: Int = sensorArraySize.height() ?: 0
+    var sensorX = (ratioX * sensorWidth).toInt()
+    var sensorY = (ratioY * sensorHeight).toInt()
 
-    if (displayRotation === Surface.ROTATION_0 && sensorOrientation === 90) {
-      new_x = (ratio_y * sensorWidth).toInt()
-      new_y = ((1 - ratio_x) * sensorHeight).toInt()
+    when (displayRotation) {
+      Surface.ROTATION_0 -> {
+        if (sensorOrientation == 90) {
+          sensorX = (ratioY * sensorWidth).toInt()
+          sensorY = ((1 - ratioX) * sensorHeight).toInt()
+        } else if (sensorOrientation == 270) {
+          sensorX = ((1 - ratioY) * sensorWidth).toInt()
+          sensorY = (ratioX * sensorHeight).toInt()
+        }
+      }
+      Surface.ROTATION_90 -> {
+        if (sensorOrientation == 90) {
+          sensorX = ((1 - ratioX) * sensorWidth).toInt()
+          sensorY = ((1 - ratioY) * sensorHeight).toInt()
+        } else if (sensorOrientation == 270) {
+          // No change needed for this configuration
+        }
+      }
+      Surface.ROTATION_180 -> {
+        if (sensorOrientation == 90) {
+          sensorX = ((1 - ratioY) * sensorWidth).toInt()
+          sensorY = (ratioX * sensorHeight).toInt()
+        } else if (sensorOrientation == 270) {
+          sensorX = (ratioY * sensorWidth).toInt()
+          sensorY = ((1 - ratioX) * sensorHeight).toInt()
+        }
+      }
+      Surface.ROTATION_270 -> {
+        if (sensorOrientation == 90) {
+          // No change needed for this configuration
+        } else if (sensorOrientation == 270) {
+          sensorX = ((1 - ratioX) * sensorWidth).toInt()
+          sensorY = ((1 - ratioY) * sensorHeight).toInt()
+        }
+      }
     }
-    return Point(new_x, new_y)
+
+    // Apply zoom level
+    val zoomFactor = 1 / zoomLevel
+    val zoomedWidth = (sensorWidth * zoomFactor).toInt()
+    val zoomedHeight = (sensorHeight * zoomFactor).toInt()
+    val cropX = (sensorWidth - zoomedWidth) / 2
+    val cropY = (sensorHeight - zoomedHeight) / 2
+
+    // Adjust sensor coordinates based on the zoom crop
+    sensorX = (cropX + sensorX * zoomFactor).toInt().coerceIn(0, sensorWidth - 1)
+    sensorY = (cropY + sensorY * zoomFactor).toInt().coerceIn(0, sensorHeight - 1)
+
+    return Point(sensorX, sensorY)
   }
 
 
@@ -366,7 +478,7 @@ class MainActivity : AppCompatActivity() {
         addTarget(imageReader.surface)
 
         val rotation = windowManager.defaultDisplay.rotation
-        val sensorOrientation = cameraCharacteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0
+        val sensorOrientation = cameraCharacteristics[CameraCharacteristics.SENSOR_ORIENTATION]!!
         val jpegOrientation = (sensorOrientation + rotationToDegrees(rotation) + 360) % 360
 
         set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
