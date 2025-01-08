@@ -23,7 +23,7 @@ object CameraInfoService {
     if (sortedCameraInfoMap != null) return
     sortedCameraInfoMap = mutableMapOf()
 
-    // 焦点距離とそれに対するCameraInfoを取得する
+    // FocalLengthとSensorSizeを取得する
     val extendedCameraInfoList = mutableListOf<ExtendedCameraInfo>()
     cameraIdList.forEach { cameraId ->
       val cameraManager = CameraManagerCompat.from(context).unwrap()
@@ -52,7 +52,8 @@ object CameraInfoService {
       }
     }
 
-    // 焦点距離を考慮して広角、超広角、望遠のCameraを確定
+    // SensorSizeが一番大きいものを広角カメラとする。　TOOD: より確実なParameterを考える
+    // その後、焦点距離を広角のものと比較して超広角、望遠のCameraを確定
     val sortedExtendedCameraInfoList = extendedCameraInfoList.sortedWith(compareBy({ it.focalLength }, { -it.sensorSize }))
     val wideRangeIndex = sortedExtendedCameraInfoList.indexOfFirst { it.sensorSize == sortedExtendedCameraInfoList.maxByOrNull { it.sensorSize }?.sensorSize }
 
